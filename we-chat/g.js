@@ -1,75 +1,14 @@
 const sha1 = require('sha1');
-const Promise = require('bluebird');
-const request = Promise.promisify(require('request'));
+const Wechat = require('./wechat');
+const util = require('./util');
+const getRawBody = require('raw-body')
 
-const prefix = 'https://api.weixin.qq.com/cgi-bin/token'
-const api = {
-  accessToken : `${prefix}?grant_type=client_credential`
-}
-
-// 获取access_token
-function Wechat(opt) {
-  this.appID = opt.appID;
-  this.appsecret = opt.appsecret;
-  this.getAccessToken = opt.getAccessToken;
-  this.saveAccessToken = opt.saveAccessToken;
-
-  this.getAccessToken().then((data) => {
-    try {
-      data = JSON.parse(data);
-    } catch(e) {
-     return  this.updateAccessToken()
-    }
-    if(this.isValidAccessToken(data)) {
-      return Promise.resolve(data)
-    } else {
-     return this.updateAccessToken()
-    }
-  }).then((data) => {
-    this.access_token = data.access_token;
-    this.expires_in = data.expires_in;
-
-    this.saveAccessToken(data)
-  })
-}
-// 检验是否过期
-Wechat.prototype.isValidAccessToken = function(data) {
-  if(!data || !data.expires_in || !data.access_token) {
-    return false
-  }
-  const access_token = data.access_token;
-  const expires_in = data.expires_in;
-  const now = (new Date().getTime())
-  if(now < expires_in) {
-    return true
-  }
-  else {
-    return false
-  }
-}
-
-Wechat.prototype.updateAccessToken = function() {
-  const appID = this.appID;
-  const appsecret = this.appsecret;
-  const url = `${api.accessToken}&appid=${appID}&secret=${appsecret}`;
-  return new Promise((resolve, reject) => {
-    request({url, json: true}).then((response) => {
-      // console.log('---- response ----')
-      // console.log(response.body)
-      const data = response.body;
-      const now = (new Date().getTime());
-      const expires_in = now + (data.expires_in - 20) * 1000;
-      data.expires_in = expires_in;
-      resolve(data)
-    })
-  })
-}
-
+// http://sunnyhuang.free.ngrok.cc/
 module.exports = function (opt) {
-  const wechat = new Wechat(opt)
+  const wechat = new Wechat(opt);
 
   return function *(next) {
-    console.log(this.query)
+    // console.log(this.query)
     const token = opt.token;
     const signature = this.query.signature;
     const nonce = this.query.nonce;
@@ -78,11 +17,43 @@ module.exports = function (opt) {
 
     const str = [token, timestamp, nonce].sort().join('');
     const sha = sha1(str);
-    if (sha === signature) {
-      //来源于微信
-      this.body = echostr + ''
-    } else {
-      this.body = 'wrong'
+    if (this.method === 'GET') {
+      if (sha === signature) {
+        //来源于微信
+        this.body = echostr + ''
+      } else {
+        this.body = 'wrong'
+      }
+    } else if (this.method === 'POST') {
+      if (sha !== signature) {
+        this.body = 'wrong';
+        return false
+      }
+      //  获取微信服务器发送的数据
+      const data = yield getRawBody(this.req, {
+        length: this.req.headers['content-length'],
+        limit: '1mb',
+        encoding: this.charset
+      })
+      const content = yield util.parseXMLAsync(data)
+      const message = util.formatMessage(content.xml)
+      console.log(message)
+      if (message.MsgType === 'event') {
+        if (message.Event === 'subscribe') {
+          const now = new Date().getTime();
+          this.status = 200;
+          this.type = 'application/xml';
+          this.body =
+            `<xml>
+               <ToUserName><![CDATA[${message.FromUserName}]]></ToUserName>
+               <FromUserName><![CDATA[${message.ToUserName}]]></FromUserName>
+               <CreateTime>${now}</CreateTime>
+               <MsgType><![CDATA[text]]></MsgType>
+               <Content><![CDATA[Hi, This is huangchucai]]></Content>
+            </xml>`
+          return
+        }
+      }
     }
   }
 }
